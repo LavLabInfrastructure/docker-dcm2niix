@@ -95,10 +95,13 @@ jobs:
               ;;
           esac
 
-          has_tag "$owner_scope"
-          status=$?
-          if [ "$status" -eq 2 ]; then
-            exit 1
+          if has_tag "$owner_scope"; then
+            status=0
+          else
+            status=$?
+            if [ "$status" -eq 2 ]; then
+              exit 1
+            fi
           fi
 
           if [ "$status" -eq 0 ]; then
