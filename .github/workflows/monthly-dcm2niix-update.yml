@@ -1,0 +1,132 @@
+name: Monthly dcm2niix update
+
+on:
+  schedule:
+    - cron: "0 0 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  check-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get latest dcm2niix release
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          latest_tag="$(gh api repos/rordenlab/dcm2niix/releases/latest --jq .tag_name)"
+          if [ -z "$latest_tag" ] || [ "$latest_tag" = "null" ]; then
+            echo "Unable to resolve latest dcm2niix release tag" >&2
+            exit 1
+          fi
+          echo "version=$latest_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if image tag already exists
+        id: image_check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          owner="${{ github.repository_owner }}"
+          version_tag="${{ steps.latest.outputs.version }}"
+          owner_type="$(gh api "repos/${{ github.repository }}" --jq '.owner.type')"
+
+          has_tag() {
+            local owner_scope="$1"
+            local response
+            local page=1
+            local count
+            local first_id
+            local previous_first_id=""
+
+            while true; do
+              response="$(gh api "${owner_scope}/packages/container/docker-dcm2niix/versions?per_page=100&page=${page}" 2>&1)" || {
+                if printf '%s' "$response" | grep -q "404 Not Found"; then
+                  return 1
+                fi
+                printf '%s\n' "$response" >&2
+                return 2
+              }
+
+              count="$(printf '%s' "$response" | jq 'length')"
+              if [ "$count" -eq 0 ]; then
+                return 1
+              fi
+
+              if printf '%s' "$response" | jq -e --arg tag "$version_tag" '.[] | .metadata.container.tags[]? | select(. == $tag)' >/dev/null; then
+                return 0
+              fi
+
+              first_id="$(printf '%s' "$response" | jq -r '.[0].id // empty')"
+              if [ -n "$previous_first_id" ] && [ "$first_id" = "$previous_first_id" ]; then
+                return 1
+              fi
+
+              previous_first_id="$first_id"
+
+              if [ "$count" -lt 100 ]; then
+                return 1
+              fi
+
+              page=$((page + 1))
+            done
+          }
+
+          case "$owner_type" in
+            Organization)
+              owner_scope="/orgs/$owner"
+              ;;
+            User)
+              owner_scope="/users/$owner"
+              ;;
+            *)
+              echo "Unsupported repository owner type: $owner_type" >&2
+              exit 1
+              ;;
+          esac
+
+          if has_tag "$owner_scope"; then
+            status=0
+          else
+            status=$?
+            if [ "$status" -eq 2 ]; then
+              exit 1
+            fi
+          fi
+
+          if [ "$status" -eq 0 ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.image_check.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push updated image
+        if: steps.image_check.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            DCM2NIIX_VERSION=${{ steps.latest.outputs.version }}
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/docker-dcm2niix:${{ steps.latest.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/docker-dcm2niix:latest
