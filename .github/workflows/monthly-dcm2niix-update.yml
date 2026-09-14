@@ -47,20 +47,42 @@ jobs:
           has_tag() {
             local owner_scope="$1"
             local response
+            local page=1
+            local count
+            local first_id
+            local previous_first_id=""
 
-            response="$(gh api --paginate "${owner_scope}/packages/container/docker-dcm2niix/versions?per_page=100" --jq '.[].metadata.container.tags[]?' 2>&1)" || {
-              if printf '%s' "$response" | grep -q "404 Not Found"; then
+            while true; do
+              response="$(gh api "${owner_scope}/packages/container/docker-dcm2niix/versions?per_page=100&page=${page}" 2>&1)" || {
+                if printf '%s' "$response" | grep -q "404 Not Found"; then
+                  return 1
+                fi
+                printf '%s\n' "$response" >&2
+                return 2
+              }
+
+              count="$(printf '%s' "$response" | jq 'length')"
+              if [ "$count" -eq 0 ]; then
                 return 1
               fi
-              printf '%s\n' "$response" >&2
-              return 2
-            }
 
-            if printf '%s\n' "$response" | grep -Fxq "$version_tag"; then
-              return 0
-            fi
+              if printf '%s' "$response" | jq -e --arg tag "$version_tag" '.[] | .metadata.container.tags[]? | select(. == $tag)' >/dev/null; then
+                return 0
+              fi
 
-            return 1
+              first_id="$(printf '%s' "$response" | jq -r '.[0].id // empty')"
+              if [ -n "$previous_first_id" ] && [ "$first_id" = "$previous_first_id" ]; then
+                return 1
+              fi
+
+              previous_first_id="$first_id"
+
+              if [ "$count" -lt 100 ]; then
+                return 1
+              fi
+
+              page=$((page + 1))
+            done
           }
 
           case "$owner_type" in

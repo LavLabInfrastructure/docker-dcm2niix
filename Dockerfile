@@ -18,7 +18,7 @@ RUN --mount=type=secret,id=github_token \
       echo "Unsupported TARGETARCH: ${TARGETARCH:-unknown}" >&2; \
       exit 1; \
     fi; \
-    asset_url="$(printf '%s' "$release_json" | jq -r '.assets[] | select((.name | test("lnx(.*)?\\.zip$"; "i")) and (.name | test("arm|aarch64"; "i") | not)) | .browser_download_url' | head -n1)"; \
+    asset_url="$(printf '%s' "$release_json" | jq -r '.assets[] | select((.content_type == "application/zip") and (.name | test("(lnx|linux)"; "i")) and (.name | test("arm|aarch64"; "i") | not)) | .browser_download_url' | head -n1)"; \
     test -n "$asset_url"; \
     test "$asset_url" != "null"; \
     curl -fsSL -o /tmp/dcm2niix.zip "$asset_url"; \
