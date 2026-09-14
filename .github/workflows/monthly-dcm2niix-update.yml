@@ -1,0 +1,62 @@
+name: Monthly dcm2niix update
+
+on:
+  schedule:
+    - cron: "0 0 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  check-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get latest dcm2niix release
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          latest_tag="$(gh api repos/rordenlab/dcm2niix/releases/latest --jq .tag_name)"
+          if [ -z "$latest_tag" ] || [ "$latest_tag" = "null" ]; then
+            echo "Unable to resolve latest dcm2niix release tag" >&2
+            exit 1
+          fi
+          echo "version=$latest_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if image tag already exists
+        id: image_check
+        run: |
+          image="ghcr.io/${{ github.repository_owner }}/docker-dcm2niix:${{ steps.latest.outputs.version }}"
+          if docker manifest inspect "$image" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.image_check.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push updated image
+        if: steps.image_check.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            DCM2NIIX_VERSION=${{ steps.latest.outputs.version }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/docker-dcm2niix:${{ steps.latest.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/docker-dcm2niix:latest
