@@ -48,9 +48,24 @@ jobs:
             local page=1
             local response
             local count
+            local status=0
 
             while true; do
-              response="$(gh api "${owner_scope}/packages/container/docker-dcm2niix/versions?per_page=100&page=${page}" 2>/dev/null || true)"
+              response="$(gh api "${owner_scope}/packages/container/docker-dcm2niix/versions?per_page=100&page=${page}" 2>&1)" || status=$?
+
+              if [ "$status" -ne 0 ]; then
+                if printf '%s' "$response" | grep -q "404 Not Found"; then
+                  return 1
+                fi
+                printf '%s\n' "$response" >&2
+                return 2
+              fi
+
+              if [ -z "$response" ]; then
+                echo "Received an empty response from GitHub Packages API" >&2
+                return 2
+              fi
+
               count="$(printf '%s' "$response" | jq 'length')"
 
               if [ "$count" -eq 0 ]; then
@@ -65,7 +80,18 @@ jobs:
             done
           }
 
-          if has_tag "/orgs/$owner" || has_tag "/users/$owner"; then
+          scope_has_tag() {
+            local scope="$1"
+            local status
+            has_tag "$scope"
+            status=$?
+            if [ "$status" -eq 2 ]; then
+              exit 1
+            fi
+            return "$status"
+          }
+
+          if scope_has_tag "/orgs/$owner" || scope_has_tag "/users/$owner"; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
