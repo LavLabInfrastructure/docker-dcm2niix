@@ -44,12 +44,28 @@ jobs:
           version_tag="${{ steps.latest.outputs.version }}"
 
           has_tag() {
-            local endpoint="$1"
-            gh api --paginate "$endpoint" --jq '.[].metadata.container.tags[]?' 2>/dev/null | grep -Fxq "$version_tag"
+            local owner_scope="$1"
+            local page=1
+            local response
+            local count
+
+            while true; do
+              response="$(gh api "${owner_scope}/packages/container/docker-dcm2niix/versions?per_page=100&page=${page}" 2>/dev/null || true)"
+              count="$(printf '%s' "$response" | jq 'length')"
+
+              if [ "$count" -eq 0 ]; then
+                return 1
+              fi
+
+              if printf '%s' "$response" | jq -e --arg tag "$version_tag" '.[] | .metadata.container.tags[]? | select(. == $tag)' >/dev/null; then
+                return 0
+              fi
+
+              page=$((page + 1))
+            done
           }
 
-          if has_tag "/orgs/$owner/packages/container/docker-dcm2niix/versions?per_page=100" || \
-             has_tag "/users/$owner/packages/container/docker-dcm2niix/versions?per_page=100"; then
+          if has_tag "/orgs/$owner" || has_tag "/users/$owner"; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"

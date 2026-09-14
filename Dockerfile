@@ -4,8 +4,11 @@ ARG DCM2NIIX_VERSION
 
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl unzip; \
-    curl -fsSL -o /tmp/dcm2niix.zip "https://github.com/rordenlab/dcm2niix/releases/download/${DCM2NIIX_VERSION}/dcm2niix_lnx.zip"; \
+    apt-get install -y --no-install-recommends ca-certificates curl jq unzip; \
+    release_json="$(curl -fsSL "https://api.github.com/repos/rordenlab/dcm2niix/releases/tags/${DCM2NIIX_VERSION}")"; \
+    asset_url="$(printf '%s' "$release_json" | jq -r '.assets[] | select(.name | test("lnx.*\\.zip$")) | .browser_download_url' | head -n1)"; \
+    test -n "$asset_url"; \
+    curl -fsSL -o /tmp/dcm2niix.zip "$asset_url"; \
     unzip -q /tmp/dcm2niix.zip -d /tmp/dcm2niix; \
     install -m 0755 /tmp/dcm2niix/dcm2niix /usr/local/bin/dcm2niix; \
     rm -rf /tmp/dcm2niix /tmp/dcm2niix.zip; \
