@@ -54,7 +54,7 @@ jobs:
 
             while true; do
               response="$(gh api "${owner_scope}/packages/container/docker-dcm2niix/versions?per_page=100&page=${page}" 2>&1)" || {
-                if printf '%s' "$response" | grep -q "404 Not Found"; then
+                if printf '%s' "$response" | grep -Eq '"status"[[:space:]]*:[[:space:]]*404|HTTP 404'; then
                   return 1
                 fi
                 printf '%s\n' "$response" >&2
