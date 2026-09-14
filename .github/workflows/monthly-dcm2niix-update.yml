@@ -51,6 +51,7 @@ jobs:
             local status=0
 
             while true; do
+              status=0
               response="$(gh api "${owner_scope}/packages/container/docker-dcm2niix/versions?per_page=100&page=${page}" 2>&1)" || status=$?
 
               if [ "$status" -ne 0 ]; then
@@ -109,6 +110,7 @@ jobs:
           push: true
           build-args: |
             DCM2NIIX_VERSION=${{ steps.latest.outputs.version }}
+            GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/docker-dcm2niix:${{ steps.latest.outputs.version }}
             ghcr.io/${{ github.repository_owner }}/docker-dcm2niix:latest
