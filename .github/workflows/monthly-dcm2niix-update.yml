@@ -110,7 +110,8 @@ jobs:
           push: true
           build-args: |
             DCM2NIIX_VERSION=${{ steps.latest.outputs.version }}
-            GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/docker-dcm2niix:${{ steps.latest.outputs.version }}
             ghcr.io/${{ github.repository_owner }}/docker-dcm2niix:latest
