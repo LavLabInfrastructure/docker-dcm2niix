@@ -35,6 +35,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Derive GHCR image name
+        id: image_name
+        run: |
+          owner="$(printf '%s' "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          echo "value=ghcr.io/${owner}/docker-dcm2niix" >> "$GITHUB_OUTPUT"
+
       - name: Check if image tag already exists
         id: image_check
         env:
@@ -128,5 +134,5 @@ jobs:
           secrets: |
             github_token=${{ secrets.GITHUB_TOKEN }}
           tags: |
-            ghcr.io/${{ github.repository_owner }}/docker-dcm2niix:${{ steps.latest.outputs.version }}
-            ghcr.io/${{ github.repository_owner }}/docker-dcm2niix:latest
+            ${{ steps.image_name.outputs.value }}:${{ steps.latest.outputs.version }}
+            ${{ steps.image_name.outputs.value }}:latest
