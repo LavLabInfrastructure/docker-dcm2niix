@@ -42,6 +42,7 @@ jobs:
         run: |
           owner="${{ github.repository_owner }}"
           version_tag="${{ steps.latest.outputs.version }}"
+          owner_type="$(gh api "repos/${{ github.repository }}" --jq '.owner.type')"
 
           has_tag() {
             local owner_scope="$1"
@@ -81,18 +82,26 @@ jobs:
             done
           }
 
-          scope_has_tag() {
-            local scope="$1"
-            local status
-            has_tag "$scope"
-            status=$?
-            if [ "$status" -eq 2 ]; then
+          case "$owner_type" in
+            Organization)
+              owner_scope="/orgs/$owner"
+              ;;
+            User)
+              owner_scope="/users/$owner"
+              ;;
+            *)
+              echo "Unsupported repository owner type: $owner_type" >&2
               exit 1
-            fi
-            return "$status"
-          }
+              ;;
+          esac
 
-          if scope_has_tag "/orgs/$owner" || scope_has_tag "/users/$owner"; then
+          has_tag "$owner_scope"
+          status=$?
+          if [ "$status" -eq 2 ]; then
+            exit 1
+          fi
+
+          if [ "$status" -eq 0 ]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"

@@ -2,6 +2,7 @@
 FROM ubuntu:24.04
 
 ARG DCM2NIIX_VERSION
+ARG TARGETARCH
 
 RUN --mount=type=secret,id=github_token \
     set -eu; \
@@ -13,7 +14,11 @@ RUN --mount=type=secret,id=github_token \
     else \
       release_json="$(curl -fsSL "https://api.github.com/repos/rordenlab/dcm2niix/releases/tags/${DCM2NIIX_VERSION}")"; \
     fi; \
-    asset_url="$(printf '%s' "$release_json" | jq -r '.assets[] | select(.name | test("lnx.*\\.zip$")) | .browser_download_url' | head -n1)"; \
+    if [ "${TARGETARCH:-amd64}" != "amd64" ]; then \
+      echo "Unsupported TARGETARCH: ${TARGETARCH:-unknown}" >&2; \
+      exit 1; \
+    fi; \
+    asset_url="$(printf '%s' "$release_json" | jq -r '.assets[] | select((.name | test("lnx.*\\.zip$")) and (.name | test("arm|aarch64"; "i") | not)) | .browser_download_url' | head -n1)"; \
     test -n "$asset_url"; \
     test "$asset_url" != "null"; \
     curl -fsSL -o /tmp/dcm2niix.zip "$asset_url"; \
