@@ -38,9 +38,11 @@ When present, FSL `.bvec` files are rotated for each output and `.bval` files
 are copied. Diffusion images with a sheared affine, vector/matrix-valued
 NIfTIs, unsupported voxel types, and filename collisions cause an explicit
 error instead of producing potentially misleading derivatives. BIDS JSON
-sidecars are copied for all three images, with phase/slice encoding direction
-and slice timing fields removed because they no longer describe the resampled
-axes. The original acquisition JSON is retained as `<filename>_source.json`.
+sidecars are copied for all three images, with phase/slice encoding axis,
+direction, and slice timing fields removed because they no longer describe the
+resampled axes. Split-series diffusion outputs with shared gradient sidecars
+are rejected instead of resampling without rotating the gradients. The
+original acquisition JSON is retained as `<filename>_source.json`.
 Review acquisition metadata and validate derivatives for the intended
 downstream use.
 
