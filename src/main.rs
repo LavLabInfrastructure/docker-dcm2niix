@@ -2,18 +2,35 @@ use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File, Metadata};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 type Matrix = [[f64; 4]; 3];
+static TEMP_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy)]
 enum Endian {
     Little,
     Big,
+}
+
+fn split_series_gradient_base(path: &Path) -> Option<PathBuf> {
+    let (base, _) = split_image_path(path)?;
+    let stem = base.file_name()?.to_str()?;
+    let (shared_stem, index) = stem.rsplit_once('_')?;
+    if index.parse::<usize>().ok()? == 0 {
+        return None;
+    }
+    let shared_base = base.with_file_name(shared_stem);
+    if sidecar(&shared_base, ".bvec").exists() || sidecar(&shared_base, ".bval").exists() {
+        Some(shared_base)
+    } else {
+        None
+    }
 }
 
 impl Endian {
@@ -121,6 +138,7 @@ struct Image {
     datatype: i16,
     bytes_per_voxel: usize,
     offset: usize,
+    data_size: usize,
     slope: f64,
     intercept: f64,
     affine: Matrix,
@@ -129,25 +147,44 @@ struct Image {
 
 impl Image {
     fn read(path: &Path) -> Result<Option<Self>> {
-        let bytes = if path.to_string_lossy().ends_with(".gz") {
-            let output = Command::new("gzip")
+        let Some(mut image) = Self::read_header(path)? else {
+            return Ok(None);
+        };
+        image.load_data(path)?;
+        Ok(Some(image))
+    }
+
+    fn read_header(path: &Path) -> Result<Option<Self>> {
+        let mut bytes = vec![0; 352];
+        if path.to_string_lossy().ends_with(".gz") {
+            let mut child = Command::new("gzip")
                 .arg("-dc")
                 .arg("--")
                 .arg(path)
-                .output()?;
-            if !output.status.success() {
-                return Err(fail(format!(
-                    "gzip failed on {}: {}",
-                    path.display(),
-                    String::from_utf8_lossy(&output.stderr)
-                )));
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?;
+            let mut stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| fail("gzip stdout unavailable"))?;
+            let header_result = stdout.read_exact(&mut bytes);
+            drop(stdout);
+            if header_result.is_err() {
+                let output = child.wait_with_output()?;
+                if !output.status.success() {
+                    return Err(fail(format!(
+                        "gzip failed on {}: {}",
+                        path.display(),
+                        String::from_utf8_lossy(&output.stderr)
+                    )));
+                }
+                return Err(header_result.unwrap_err().into());
             }
-            output.stdout
+            let _ = child.kill();
+            child.wait()?;
         } else {
-            fs::read(path)?
-        };
-        if bytes.len() < 352 {
-            return Err(fail("NIfTI header is too short"));
+            File::open(path)?.read_exact(&mut bytes)?;
         }
         let endian = if i32::from_le_bytes(bytes[..4].try_into()?) == 348 {
             Endian::Little
@@ -198,9 +235,6 @@ impl Image {
             .try_fold(bytes_per_voxel, |a, b| a.checked_mul(*b))
             .and_then(|v| v.checked_add(offset))
             .ok_or_else(|| fail("NIfTI size overflow"))?;
-        if size > bytes.len() {
-            return Err(fail("truncated NIfTI voxel data"));
-        }
         let raw_slope = endian.f32(&bytes[112..]) as f64;
         let raw_intercept = endian.f32(&bytes[116..]) as f64;
         let (slope, intercept) = if raw_slope == 0.0 {
@@ -232,11 +266,36 @@ impl Image {
             datatype,
             bytes_per_voxel,
             offset,
+            data_size: size,
             slope,
             intercept,
             affine,
             spacing,
         }))
+    }
+
+    fn load_data(&mut self, path: &Path) -> Result<()> {
+        self.bytes = if path.to_string_lossy().ends_with(".gz") {
+            let output = Command::new("gzip")
+                .arg("-dc")
+                .arg("--")
+                .arg(path)
+                .output()?;
+            if !output.status.success() {
+                return Err(fail(format!(
+                    "gzip failed on {}: {}",
+                    path.display(),
+                    String::from_utf8_lossy(&output.stderr)
+                )));
+            }
+            output.stdout
+        } else {
+            fs::read(path)?
+        };
+        if self.data_size > self.bytes.len() {
+            return Err(fail("truncated NIfTI voxel data"));
+        }
+        Ok(())
     }
 
     fn eligible(&self) -> bool {
@@ -566,12 +625,20 @@ struct TemporaryFiles {
 impl TemporaryFiles {
     fn new(parent: &Path) -> Result<Self> {
         use std::os::unix::fs::DirBuilderExt;
-        let directory = parent.join(format!(".dcm2niix-orient-{}", std::process::id()));
-        fs::DirBuilder::new().mode(0o700).create(&directory)?;
-        Ok(Self {
-            directory,
-            files: Vec::new(),
-        })
+        loop {
+            let id = TEMP_DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let directory = parent.join(format!(".dcm2niix-orient-{}-{id}", std::process::id()));
+            match fs::DirBuilder::new().mode(0o700).create(&directory) {
+                Ok(()) => {
+                    return Ok(Self {
+                        directory,
+                        files: Vec::new(),
+                    })
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
 
     fn allocate(&mut self) -> Result<PathBuf> {
@@ -678,12 +745,19 @@ fn rotate_bvecs(text: &str, image: &Image, grid: &Grid) -> Result<String> {
 }
 
 fn process_image(path: &Path) -> Result<()> {
-    let Some(image) = Image::read(path)? else {
+    if let Some(shared_base) = split_series_gradient_base(path) {
+        return Err(fail(format!(
+            "cannot resample split diffusion series with shared gradients: {}",
+            shared_base.display()
+        )));
+    }
+    let Some(mut image) = Image::read_header(path)? else {
         return Ok(());
     };
     if !image.eligible() {
         return Ok(());
     }
+    image.load_data(path)?;
     image.validate_scalar()?;
     let grids = grids(&image)?;
     let (base, extension) = split_image_path(path).ok_or_else(|| fail("invalid NIfTI filename"))?;
@@ -746,7 +820,7 @@ fn process_image(path: &Path) -> Result<()> {
             let target = temp.allocate()?;
             let output = File::create(&target)?;
             let status = Command::new("jq")
-                .args(["del(.PhaseEncodingDirection, .SliceEncodingDirection, .SliceTiming, .SliceEncodingOrder) | . + {SpatialResampling: \"Resampled to cardinal axes; acquisition metadata describes the source DICOM\"}"])
+                .args(["del(.PhaseEncodingDirection, .PhaseEncodingAxis, .SliceEncodingDirection, .SliceTiming, .SliceEncodingOrder) | . + {SpatialResampling: \"Resampled to cardinal axes; acquisition metadata describes the source DICOM\"}"])
                 .arg(&json).stdout(Stdio::from(output)).status()?;
             if !status.success() {
                 return Err(fail(format!("could not update {}", json.display())));
@@ -800,12 +874,18 @@ fn images(dir: &Path) -> Result<HashMap<PathBuf, FileState>> {
     if !dir.exists() {
         return Ok(found);
     }
-    for item in fs::read_dir(dir)? {
-        let item = item?;
-        let path = item.path();
-        let meta = item.metadata()?;
-        if meta.is_file() && split_image_path(&path).is_some() {
-            found.insert(path, state(&meta));
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for item in fs::read_dir(directory)? {
+            let item = item?;
+            let path = item.path();
+            let file_type = item.file_type()?;
+            if file_type.is_dir() {
+                pending.push(path);
+            } else if file_type.is_file() && split_image_path(&path).is_some() {
+                let meta = item.metadata()?;
+                found.insert(path, state(&meta));
+            }
         }
     }
     Ok(found)
@@ -882,6 +962,7 @@ mod tests {
             datatype: 16,
             bytes_per_voxel: 4,
             offset: 352,
+            data_size: 384,
             slope: 1.0,
             intercept: 0.0,
             affine,
@@ -1109,10 +1190,7 @@ mod tests {
 
     impl Drop for TestDir {
         fn drop(&mut self) {
-            for entry in fs::read_dir(&self.0).unwrap() {
-                fs::remove_file(entry.unwrap().path()).unwrap();
-            }
-            fs::remove_dir(&self.0).unwrap();
+            fs::remove_dir_all(&self.0).unwrap();
         }
     }
 
@@ -1123,7 +1201,7 @@ mod tests {
         write_fixture(&input);
         fs::write(dir.0.join("scan.bvec"), "0 1\n0 0\n0 0\n").unwrap();
         fs::write(dir.0.join("scan.bval"), "0 1000\n").unwrap();
-        let json = r#"{"PhaseEncodingDirection":"j","SliceTiming":[0,1],"Manufacturer":"test"}"#;
+        let json = r#"{"PhaseEncodingDirection":"j","PhaseEncodingAxis":1,"SliceTiming":[0,1],"Manufacturer":"test"}"#;
         fs::write(dir.0.join("scan.json"), json).unwrap();
         process_image(&input).unwrap();
         let axial = Image::read(&input).unwrap().unwrap();
@@ -1154,6 +1232,7 @@ mod tests {
             );
             let metadata = fs::read_to_string(dir.0.join(format!("scan{suffix}.json"))).unwrap();
             assert!(!metadata.contains("PhaseEncodingDirection"));
+            assert!(!metadata.contains("PhaseEncodingAxis"));
             assert!(!metadata.contains("SliceTiming"));
             assert!(metadata.contains("SpatialResampling"));
         }
@@ -1208,5 +1287,56 @@ mod tests {
             assert!(!dir.0.join("scan_sagittal.nii").exists());
             assert!(!dir.0.join("scan_coronal.nii").exists());
         }
+    }
+
+    #[test]
+    fn skips_voxel_loading_for_ineligible_images() {
+        let dir = TestDir::new("header-only");
+        let input = dir.0.join("scan.nii");
+        write_fixture(&input);
+        let mut bytes = fs::read(&input).unwrap();
+        let cardinal = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+        for r in 0..3 {
+            for c in 0..4 {
+                Endian::Little.put_f32(&mut bytes[280 + r * 16 + c * 4..], cardinal[r][c] as f32);
+            }
+        }
+        bytes.truncate(352);
+        fs::write(&input, &bytes).unwrap();
+        process_image(&input).unwrap();
+        assert_eq!(fs::read(&input).unwrap(), bytes);
+    }
+
+    #[test]
+    fn rejects_split_diffusion_images_with_shared_gradients() {
+        let dir = TestDir::new("split-diffusion");
+        let input = dir.0.join("scan_1.nii");
+        write_fixture(&input);
+        let original = fs::read(&input).unwrap();
+        fs::write(dir.0.join("scan.bvec"), "1 0\n0 1\n0 0\n").unwrap();
+        assert!(process_image(&input).is_err());
+        assert_eq!(fs::read(&input).unwrap(), original);
+        assert!(!dir.0.join("scan_1_sagittal.nii").exists());
+    }
+
+    #[test]
+    fn images_includes_new_and_changed_nested_niftis() {
+        let dir = TestDir::new("nested");
+        let nested = dir.0.join("subject");
+        let deeper = nested.join("session");
+        fs::create_dir_all(&deeper).unwrap();
+        let changed = nested.join("scan.nii");
+        write_fixture(&changed);
+        let before = images(&dir.0).unwrap();
+        write_fixture(&changed);
+        let added = deeper.join("scan.nii.gz");
+        fs::write(&added, b"fixture").unwrap();
+        let after = images(&dir.0).unwrap();
+        assert!(before.get(&changed) != after.get(&changed));
+        assert!(after.contains_key(&added));
     }
 }
